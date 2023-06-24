@@ -2,40 +2,61 @@
 
 # Make certain this script is chmod 700.
 
-# API Token - Requires DNS:Edit permission for the zone, nothing else.
+# API Token - Requires DNS:Edit permission for applicable zones, nothing else.
 TOKEN=""
 
-# Zone
-ZONE="example.com"
+# System IP Address
+IP="$(curl -s https://ifconfig.me/ip)"
 
-# Name/IP Pairs
-typeset -A RECORDS=(
-	["subdomain1.example.com"]="10.10.10.1"
-	["subdomain2.example.com"]="$(curl https://ifconfig.me/ip)"
-)
+echo
+echo "--- cloudflare-ddns, ${IP}: $(date)"
 
-# --- END OF CONFIG
+# DNS Records
+# Tab-delimited, including ZONE, TYPE, NAME, CONTENT and PROXY status.
+declare -a RECORDS
 
-# Step 1: Get ID for $ZONE. This is shown in the dashboard, but it's better to retrieve via API.
-ZONEID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$ZONE&status=active" \
-	-H "Authorization: Bearer $TOKEN" \
-	-H "Content-Type: application/json" | jq -r '{"result"}[] | .[0] | .id')
+#          ZONE                 TYPE    NAME                    CONTENT         PROXY
+RECORDS+=("example1.com         A       example1.com            $IP             true")
+RECORDS+=("example1.com         CNAME   www.example1.com        $IP             true")
 
-# Step 2: For each name/ip pair in RECORDS, do the following:
-for RECORD in "${!RECORDS[@]}"
+#
+# -- END OF CONFIGURATION
+#
+
+for RECORDIDX in "${RECORDS[@]}"
 do
 
-	echo "$RECORD -> ${RECORDS[$RECORD]}"
+        IFS=$'\t' read -r -a RECORD <<< "${RECORDIDX}"
+        ZONE="${RECORD[0]}"
+        TYPE="${RECORD[1]}"
+        NAME="${RECORD[2]}"
+        CONTENT="${RECORD[3]}"
+        PROXIED="${RECORD[4]}"
 
-	# Step 2.1: Get ID for $RECORD. This is not shown in the dashboard and must be retrieved via API.
-	RECORDID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONEID/dns_records?type=A&name=$RECORD" \
-		-H "Authorization: Bearer $TOKEN" \
-		-H "Content-Type: application/json" | jq -r '{"result"}[] | .[0] | .id')
+        # Step 1: Get ID for record $ZONE.
+        ZONEID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$ZONE&status=active" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" | jq -r '{"result"}[] | .[0] | .id')
 
-	# Step 2.2: API request to update $RECORD.
-	curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONEID/dns_records/$RECORDID" \
-		-H "Authorization: Bearer $TOKEN" \
-		-H "Content-Type: application/json" \
-		--data "{\"type\":\"A\",\"name\":\"$RECORD\",\"content\":\"${RECORDS[$RECORD]}\",\"ttl\":1,\"proxied\":false}" | jq
+        echo "  * zone: ${ZONE}, id: ${ZONEID}"
+
+        # Step 2: Get ID for record $NAME.
+        NAMEID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONEID/dns_records?type=$TYPE&name=$NAME" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" | jq -r '{"result"}[] | .[0] | .id')
+
+        echo "  * name: ${NAME}, id: ${NAMEID}"
+
+        # Step 3: API request to update record $NAME.
+        curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONEID/dns_records/$NAMEID" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                --data "{\"type\":\"$TYPE\",\"name\":\"$NAME\",\"content\":\"$CONTENT\",\"ttl\":1,\"proxied\":$PROXIED}" | jq
+
+        # Whew, rest.
+        sleep 1
 
 done
+
+echo "--- update complete"
+echo
